@@ -27,7 +27,7 @@ def get_garmin_data():
         client.login()
 
         # 최근 활동 5개 가져오기
-        activities = client.get_activities(0, 5)
+        activities = client.get_activities(0, 20)
 
         # 데이터 가공
         simplified = []
