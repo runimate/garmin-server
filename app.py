@@ -36,12 +36,16 @@ def garmin_login():
             if km > 0:
                 pace_sec = duration / km
 
+            # [핵심 수정] 가민 원본에서 진짜 운동 종류(running, walking 등)를 빼냅니다!
+            sport_type = act.get('activityType', {}).get('typeKey', 'unknown')
+
             formatted_data.append({
                 'date': date_str,
                 'km': "{:.2f}".format(km),
                 'paceSec': pace_sec,
                 'timeSec': duration,
-                'type': 'garmin'
+                'type': 'garmin',
+                'sportType': sport_type # <--- 프론트엔드로 전달!
             })
 
         return jsonify({'success': True, 'data': formatted_data})
@@ -52,10 +56,8 @@ def garmin_login():
 
 
 # ==========================================
-# [2] STRAVA (Multi-User Safe Logic)
+# [2] STRAVA
 # ==========================================
-# [중요] 코드에 직접 적지 말고 os.environ.get만 남겨둡니다.
-# Railway 대시보드 Variables 탭에 값을 입력해야 작동합니다.
 STRAVA_CLIENT_ID = os.environ.get('STRAVA_CLIENT_ID')
 STRAVA_CLIENT_SECRET = os.environ.get('STRAVA_CLIENT_SECRET')
 
@@ -97,23 +99,26 @@ def get_strava_data():
         # 3. 데이터 가공
         formatted_data = []
         for activity in activities:
-            if activity.get("type") == "Run": 
-                start_date = activity.get("start_date_local", "")
-                local_date = start_date[:10].replace("-", ".")
-                raw_km = activity.get("distance", 0) / 1000
-                km = f"{raw_km:.2f}"
-                moving_time = activity.get("moving_time", 0)
-                pace_sec = 0
-                if raw_km > 0:
-                    pace_sec = int(moving_time / raw_km)
-                
-                formatted_data.append({
-                    "date": local_date,
-                    "km": km,
-                    "paceSec": pace_sec,
-                    "timeSec": moving_time,
-                    "type": "strava"
-                })
+            start_date = activity.get("start_date_local", "")
+            local_date = start_date[:10].replace("-", ".")
+            raw_km = activity.get("distance", 0) / 1000
+            km = f"{raw_km:.2f}"
+            moving_time = activity.get("moving_time", 0)
+            pace_sec = 0
+            if raw_km > 0:
+                pace_sec = int(moving_time / raw_km)
+            
+            # [핵심 수정] 스트라바 원본에서 진짜 운동 종류(Run, Walk 등)를 빼냅니다!
+            sport_type = activity.get("sport_type") or activity.get("type", "unknown")
+            
+            formatted_data.append({
+                "date": local_date,
+                "km": km,
+                "paceSec": pace_sec,
+                "timeSec": moving_time,
+                "type": "strava",
+                "sportType": sport_type # <--- 프론트엔드로 전달!
+            })
 
         return jsonify({"success": True, "data": formatted_data})
 
