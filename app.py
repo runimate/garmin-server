@@ -23,10 +23,14 @@ def garmin_login():
     try:
         client = Garmin(email, password)
         client.login()
-        activities = client.get_activities(0, 20)
+        activities = client.get_activities(0, 40)
         
         formatted_data = []
         for act in activities:
+            sport_type = act.get('activityType', {}).get('typeKey', 'unknown')
+            if 'run' not in sport_type.lower():  # 러닝/트레일러닝 계열만 포함 (사이클링, 걷기 등 제외)
+                continue
+
             start_time = act.get('startTimeLocal', '')
             date_str = start_time[:10].replace('-', '.')
             distance_meters = act.get('distance', 0)
@@ -36,8 +40,7 @@ def garmin_login():
             if km > 0:
                 pace_sec = duration / km
 
-            # [핵심 수정] 가민 원본에서 진짜 운동 종류(running, walking 등)를 빼냅니다!
-            sport_type = act.get('activityType', {}).get('typeKey', 'unknown')
+            elev_gain = act.get('elevationGain', 0) or 0
 
             formatted_data.append({
                 'date': date_str,
@@ -45,7 +48,8 @@ def garmin_login():
                 'paceSec': pace_sec,
                 'timeSec': duration,
                 'type': 'garmin',
-                'sportType': sport_type # <--- 프론트엔드로 전달!
+                'sportType': sport_type, # <--- 프론트엔드로 전달!
+                'elevGain': round(elev_gain)
             })
 
         return jsonify({'success': True, 'data': formatted_data})
@@ -99,6 +103,11 @@ def get_strava_data():
         # 3. 데이터 가공
         formatted_data = []
         for activity in activities:
+            # [핵심 수정] 스트라바 원본에서 진짜 운동 종류(Run, Walk 등)를 빼냅니다!
+            sport_type = activity.get("sport_type") or activity.get("type", "unknown")
+            if 'run' not in sport_type.lower():  # 러닝/트레일러닝 계열만 포함 (사이클링, 걷기 등 제외)
+                continue
+
             start_date = activity.get("start_date_local", "")
             local_date = start_date[:10].replace("-", ".")
             raw_km = activity.get("distance", 0) / 1000
@@ -107,9 +116,8 @@ def get_strava_data():
             pace_sec = 0
             if raw_km > 0:
                 pace_sec = int(moving_time / raw_km)
-            
-            # [핵심 수정] 스트라바 원본에서 진짜 운동 종류(Run, Walk 등)를 빼냅니다!
-            sport_type = activity.get("sport_type") or activity.get("type", "unknown")
+
+            elev_gain = activity.get("total_elevation_gain", 0) or 0
             
             formatted_data.append({
                 "date": local_date,
@@ -117,7 +125,8 @@ def get_strava_data():
                 "paceSec": pace_sec,
                 "timeSec": moving_time,
                 "type": "strava",
-                "sportType": sport_type # <--- 프론트엔드로 전달!
+                "sportType": sport_type, # <--- 프론트엔드로 전달!
+                "elevGain": round(elev_gain)
             })
 
         return jsonify({"success": True, "data": formatted_data})
