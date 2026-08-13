@@ -190,6 +190,24 @@ def strava_webhook_receive():
     return jsonify({'status': 'EVENT_RECEIVED'}), 200
 
 
+@app.route('/api/strava/webhook/debug', methods=['GET'])
+def strava_webhook_debug():
+    """
+    임시 디버그용: 시크릿 값 자체는 절대 노출하지 않고,
+    Railway 환경변수가 이 배포(worker)에 실제로 전달됐는지만 확인합니다.
+    확인 끝나면 이 라우트는 삭제하는 걸 권장합니다.
+    """
+    def info(v):
+        return {'set': bool(v), 'length': len(v) if v else 0}
+
+    return jsonify({
+        'STRAVA_CLIENT_ID': info(STRAVA_CLIENT_ID),
+        'STRAVA_CLIENT_SECRET': info(STRAVA_CLIENT_SECRET),
+        'STRAVA_VERIFY_TOKEN': info(STRAVA_VERIFY_TOKEN),
+        'STRAVA_WEBHOOK_ADMIN_KEY': info(STRAVA_WEBHOOK_ADMIN_KEY),
+    }), 200
+
+
 @app.route('/api/strava/webhook/setup', methods=['GET'])
 def strava_webhook_setup():
     """
