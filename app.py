@@ -49,8 +49,32 @@ def garmin_login():
                 'timeSec': duration,
                 'type': 'garmin',
                 'sportType': sport_type, # <--- 프론트엔드로 전달!
-                'elevGain': round(elev_gain)
+                'elevGain': round(elev_gain),
+                'activityId': act.get('activityId'),
+                'polyline': None # 아래에서 제한된 개수만 채움 (Railway 부담 방지)
             })
+
+        # 지도 경로용 GPS 폴리라인 추가 조회.
+        # Garmin은 목록 API에 좌표가 없어 활동별로 상세 조회(get_activity_details)를 한 번 더 호출해야 함.
+        # 활동마다 추가 요청이 발생하므로, Railway/Garmin 비공식 API 부담을 막기 위해
+        # "가장 최근 N개" 활동에 대해서만 폴리라인을 채워 넣음 (그 외 활동은 Map 탭이 자동으로 숨겨짐).
+        GARMIN_POLYLINE_LIMIT = 8
+        for item in formatted_data[:GARMIN_POLYLINE_LIMIT]:
+            activity_id = item.get('activityId')
+            if not activity_id:
+                continue
+            try:
+                details = client.get_activity_details(activity_id, maxpoly=300)
+                raw_points = (details.get('geoPolylineDTO') or {}).get('polyline') or []
+                coords = [
+                    {'lat': p.get('lat'), 'lon': p.get('lon')}
+                    for p in raw_points
+                    if p.get('lat') is not None and p.get('lon') is not None
+                ]
+                item['polyline'] = coords if len(coords) >= 2 else None
+            except Exception as poly_err:
+                print(f"Garmin polyline fetch failed for activity {activity_id}: {poly_err}")
+                item['polyline'] = None
 
         return jsonify({'success': True, 'data': formatted_data})
 
@@ -123,6 +147,10 @@ def get_strava_data():
 
             elev_gain = activity.get("total_elevation_gain", 0) or 0
 
+            # 지도 경로용 GPS 폴리라인. summary_polyline은 활동 목록 조회(/athlete/activities) 응답에
+            # 이미 포함되어 있어 추가 API 호출이 전혀 필요 없음 (Railway/Strava 쿼터 부담 없음).
+            polyline = (activity.get("map") or {}).get("summary_polyline", "") or ""
+
             formatted_data.append({
                 "date": local_date,
                 "km": km,
@@ -130,7 +158,8 @@ def get_strava_data():
                 "timeSec": moving_time,
                 "type": "strava",
                 "sportType": sport_type, # <--- 프론트엔드로 전달!
-                "elevGain": round(elev_gain)
+                "elevGain": round(elev_gain),
+                "polyline": polyline # <--- 인코딩된 문자열. 디코딩은 프론트에서 처리.
             })
 
         return jsonify({"success": True, "data": formatted_data})
