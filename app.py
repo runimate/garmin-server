@@ -8,6 +8,49 @@ from datetime import datetime
 app = Flask(__name__)
 CORS(app)
 
+
+# ==========================================
+# 공통 헬퍼
+# ==========================================
+def want_sport(sport_type, include_hike):
+    """러닝/트레일러닝은 항상 포함. include_hike=True(V3.0)일 때만 하이킹도 포함.
+    V2.5는 이 플래그를 보내지 않으므로 기존과 똑같이 러닝 계열만 받음."""
+    s = (sport_type or '').lower()
+    if 'run' in s:
+        return True
+    return include_hike and 'hik' in s
+
+
+def downsample_profile(dist_m, elev_m, n=120):
+    """거리(m)·고도(m) 배열을 [[km, m], ...] 형태로 최대 n개 지점까지 줄임 (고도표용)."""
+    pts = [(d, e) for d, e in zip(dist_m, elev_m) if d is not None and e is not None]
+    if len(pts) < 2:
+        return None
+    if len(pts) > n:
+        step = (len(pts) - 1) / (n - 1)
+        pts = [pts[round(i * step)] for i in range(n)]
+    return [[round(d / 1000, 3), round(e, 1)] for d, e in pts]
+
+
+def garmin_elev_profile(details):
+    """get_activity_details 응답의 차트 데이터에서 거리·고도만 뽑아냄."""
+    try:
+        idx = {m.get('key'): m.get('metricsIndex') for m in (details.get('metricDescriptors') or [])}
+        ei = idx.get('directElevation')
+        di = idx.get('sumDistance')
+        if ei is None or di is None:
+            return None
+        dist, elev = [], []
+        for row in details.get('activityDetailMetrics') or []:
+            m = row.get('metrics') or []
+            if max(ei, di) < len(m):
+                dist.append(m[di])
+                elev.append(m[ei])
+        return downsample_profile(dist, elev)
+    except Exception as e:
+        print(f"Garmin elevation parse failed: {e}")
+        return None
+
 # ==========================================
 # [1] GARMIN
 # ==========================================
@@ -16,6 +59,7 @@ def garmin_login():
     data = request.json
     email = data.get('email')
     password = data.get('password')
+    include_hike = bool(data.get('includeHike'))
 
     if not email or not password:
         return jsonify({'success': False, 'message': 'Email and password required'}), 400
@@ -28,7 +72,7 @@ def garmin_login():
         formatted_data = []
         for act in activities:
             sport_type = act.get('activityType', {}).get('typeKey', 'unknown')
-            if 'run' not in sport_type.lower():  # 러닝/트레일러닝 계열만 포함 (사이클링, 걷기 등 제외)
+            if not want_sport(sport_type, include_hike):  # 러닝/트레일러닝(+V3.0은 하이킹)만 포함
                 continue
 
             start_time = act.get('startTimeLocal', '')
@@ -51,7 +95,8 @@ def garmin_login():
                 'sportType': sport_type, # <--- 프론트엔드로 전달!
                 'elevGain': round(elev_gain),
                 'activityId': act.get('activityId'),
-                'polyline': None # 아래에서 제한된 개수만 채움 (Railway 부담 방지)
+                'polyline': None, # 아래에서 제한된 개수만 채움 (Railway 부담 방지)
+                'elevProfile': None # 고도표용 [[km, m], ...] — 폴리라인과 같은 상세 응답에서 함께 채움
             })
 
         # 지도 경로용 GPS 폴리라인 추가 조회.
@@ -64,7 +109,7 @@ def garmin_login():
             if not activity_id:
                 continue
             try:
-                details = client.get_activity_details(activity_id, maxpoly=300)
+                details = client.get_activity_details(activity_id, maxchart=400, maxpoly=300)
                 raw_points = (details.get('geoPolylineDTO') or {}).get('polyline') or []
                 coords = [
                     {'lat': p.get('lat'), 'lon': p.get('lon')}
@@ -72,6 +117,7 @@ def garmin_login():
                     if p.get('lat') is not None and p.get('lon') is not None
                 ]
                 item['polyline'] = coords if len(coords) >= 2 else None
+                item['elevProfile'] = garmin_elev_profile(details)
             except Exception as poly_err:
                 print(f"Garmin polyline fetch failed for activity {activity_id}: {poly_err}")
                 item['polyline'] = None
@@ -98,6 +144,9 @@ def get_strava_data():
     try:
         data = request.get_json()
         code = data.get('code')
+        include_hike = bool(data.get('includeHike'))
+        # V3.0은 기록을 고를 때 고도 데이터를 따로 받아오기 위해 토큰을 돌려받음 (서버에는 저장하지 않음)
+        return_token = bool(data.get('returnToken'))
 
         if not code:
             return jsonify({"success": False, "message": "Authorization code is missing"}), 400
@@ -133,7 +182,7 @@ def get_strava_data():
         for activity in activities:
             # [핵심 수정] 스트라바 원본에서 진짜 운동 종류(Run, Walk 등)를 빼냅니다!
             sport_type = activity.get("sport_type") or activity.get("type", "unknown")
-            if 'run' not in sport_type.lower():  # 러닝/트레일러닝 계열만 포함 (사이클링, 걷기 등 제외)
+            if not want_sport(sport_type, include_hike):  # 러닝/트레일러닝(+V3.0은 하이킹)만 포함
                 continue
 
             start_date = activity.get("start_date_local", "")
@@ -159,13 +208,47 @@ def get_strava_data():
                 "type": "strava",
                 "sportType": sport_type, # <--- 프론트엔드로 전달!
                 "elevGain": round(elev_gain),
-                "polyline": polyline # <--- 인코딩된 문자열. 디코딩은 프론트에서 처리.
+                "polyline": polyline, # <--- 인코딩된 문자열. 디코딩은 프론트에서 처리.
+                "activityId": activity.get("id")
             })
 
-        return jsonify({"success": True, "data": formatted_data})
+        result = {"success": True, "data": formatted_data}
+        if return_token:
+            result["token"] = access_token
+            result["tokenExpiresAt"] = token_data.get("expires_at")
+        return jsonify(result)
 
     except Exception as e:
         print(f"Strava Error: {str(e)}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route('/api/strava/elevation', methods=['POST'])
+def get_strava_elevation():
+    """V3.0: 사용자가 기록 하나를 고르면 그 기록의 고도 스트림만 받아옴 (기록 1개당 API 1회)."""
+    try:
+        data = request.get_json(silent=True) or {}
+        token = data.get('token')
+        activity_id = data.get('activityId')
+        if not token or not activity_id:
+            return jsonify({"success": False, "message": "token and activityId required"}), 400
+
+        resp = requests.get(
+            f"https://www.strava.com/api/v3/activities/{int(activity_id)}/streams",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"keys": "altitude,distance", "key_by_type": "true"},
+            timeout=15
+        )
+        if resp.status_code == 401:
+            return jsonify({"success": False, "message": "token expired"}), 401
+        resp.raise_for_status()
+        streams = resp.json() or {}
+        dist = (streams.get('distance') or {}).get('data') or []
+        elev = (streams.get('altitude') or {}).get('data') or []
+        return jsonify({"success": True, "elevProfile": downsample_profile(dist, elev)})
+
+    except Exception as e:
+        print(f"Strava elevation Error: {str(e)}")
         return jsonify({"success": False, "message": str(e)}), 500
 
 
