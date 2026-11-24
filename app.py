@@ -403,6 +403,135 @@ def strava_webhook_status():
         return jsonify({'error': str(e)}), 500
 
 
+
+# ==========================================
+# [4] COROS (비공식 — 코로스 Training Hub 웹이 쓰는 API. 가민처럼 아이디/비밀번호 로그인)
+# 언제든 바뀌거나 막힐 수 있음. 비밀번호는 저장하지 않고 이 요청 안에서만 사용.
+# ==========================================
+import hashlib, math
+import xml.etree.ElementTree as ET
+
+COROS_BASES = ['https://teamapi.coros.com', 'https://teameuapi.coros.com']
+COROS_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+    'Accept': 'application/json, text/plain, */*',
+    'Origin': 'https://training.coros.com',
+    'Referer': 'https://training.coros.com/',
+}
+# 코로스 종목 코드 → 앱에서 쓰는 종목 이름 (classify가 run/trail/hike를 구분)
+COROS_SPORTS = {100: 'running', 101: 'treadmill_running', 103: 'track_running', 102: 'trail_running', 104: 'hiking', 105: 'mountain_climb_hiking'}
+
+
+def coros_login(email, password):
+    """지역 서버(미주 → 유럽) 순서로 로그인을 시도. 성공하면 (base, token, userId)."""
+    body = {'account': email, 'accountType': 2, 'pwd': hashlib.md5(password.encode('utf-8')).hexdigest()}
+    last = 'login failed'
+    for base in COROS_BASES:
+        try:
+            r = requests.post(f'{base}/account/login', json=body, headers=COROS_HEADERS, timeout=20)
+            d = r.json()
+            if d.get('result') == '0000' and (d.get('data') or {}).get('accessToken'):
+                return base, d['data']['accessToken'], str(d['data'].get('userId', ''))
+            last = d.get('message') or last
+        except Exception as e:
+            last = str(e)
+    raise Exception(last)
+
+
+def coros_get(base, token, uid, path, params=None, method='GET'):
+    h = dict(COROS_HEADERS, accessToken=token, accesstoken=token, yfheader='{"userId":"%s"}' % uid)
+    if method == 'POST':
+        r = requests.post(f'{base}/{path}', params=params, json={}, headers=h, timeout=20)
+    else:
+        r = requests.get(f'{base}/{path}', params=params, headers=h, timeout=20)
+    d = r.json()
+    if d.get('result') != '0000':
+        raise Exception(d.get('message') or d.get('result'))
+    return d.get('data') or {}
+
+
+def gpx_track(xml_bytes):
+    """GPX에서 [위도, 경도, 고도] 목록."""
+    root = ET.fromstring(xml_bytes)
+    pts = []
+    for el in root.iter():
+        if el.tag.endswith('trkpt') or el.tag.endswith('rtept'):
+            ele = None
+            for ch in el:
+                if ch.tag.endswith('ele'):
+                    try:
+                        ele = float(ch.text)
+                    except Exception:
+                        ele = None
+            try:
+                pts.append((float(el.get('lat')), float(el.get('lon')), ele))
+            except Exception:
+                pass
+    return pts
+
+
+def track_to_extras(pts):
+    """GPX 지점들 → 지도용 polyline, 고도표, 정상/시작 좌표."""
+    if len(pts) < 2:
+        return None, None, None, None
+    dist, d = [0.0], 0.0
+    for i in range(1, len(pts)):
+        la1, lo1, la2, lo2 = map(math.radians, (pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1]))
+        a = math.sin((la2 - la1) / 2) ** 2 + math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ** 2
+        d += 6371000 * 2 * math.asin(min(1, math.sqrt(a)))
+        dist.append(d)
+    step = max(1, len(pts) // 300)
+    poly = [{'lat': p[0], 'lon': p[1]} for p in pts[::step]]
+    elev = [p[2] for p in pts]
+    prof = downsample_profile(dist, elev) if any(e is not None for e in elev) else None
+    summit = summit_point([p[0] for p in pts], [p[1] for p in pts], elev)
+    return poly, prof, summit, [round(pts[0][0], 6), round(pts[0][1], 6)]
+
+
+@app.route('/api/coros', methods=['POST'])
+def coros_import():
+    try:
+        data = request.get_json(silent=True) or {}
+        email, password = data.get('email'), data.get('password')
+        include_hike = bool(data.get('includeHike'))
+        if not email or not password:
+            return jsonify({'success': False, 'message': 'email and password required'}), 400
+        base, token, uid = coros_login(email, password)
+        lst = coros_get(base, token, uid, 'activity/query', {'pageNumber': 1, 'size': 40})
+        out = []
+        for a in lst.get('dataList') or []:
+            st = int(a.get('sportType') or 0)
+            name = COROS_SPORTS.get(st)
+            if not name or (name.endswith('hiking') and not include_hike):
+                continue
+            km = float(a.get('distance') or 0) / 1000
+            sec = int(a.get('workoutTime') or a.get('totalTime') or 0)
+            tz = int(a.get('startTimezone') or 0) * 15 * 60  # 15분 단위 → 초
+            t0 = int(a.get('startTime') or 0)
+            date_str = datetime.utcfromtimestamp(t0 + tz).strftime('%Y.%m.%d') if t0 else ''
+            out.append({
+                'date': date_str, 'km': '{:.2f}'.format(km), 'paceSec': int(sec / km) if km > 0 else 0,
+                'timeSec': sec, 'type': 'coros', 'sportType': name, 'elevGain': round(float(a.get('ascent') or 0)),
+                'activityId': str(a.get('labelId') or ''), 'corosSport': st, 'name': a.get('name') or '',
+                'polyline': None, 'elevProfile': None, 'summit': None, 'start': None,
+            })
+        # 지도·고도표용 GPX는 최근 8개만 (가민과 같은 기준)
+        for item in out[:8]:
+            try:
+                info = coros_get(base, token, uid, 'activity/detail/download',
+                                 {'labelId': item['activityId'], 'sportType': item['corosSport'], 'fileType': 1}, method='POST')
+                url = info.get('fileUrl')
+                if not url:
+                    continue
+                pts = gpx_track(requests.get(url, timeout=20).content)
+                item['polyline'], item['elevProfile'], item['summit'], item['start'] = track_to_extras(pts)
+            except Exception as e:
+                print(f"COROS gpx failed {item['activityId']}: {e}")
+        return jsonify({'success': True, 'data': out})
+    except Exception as e:
+        print(f"COROS Error: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
