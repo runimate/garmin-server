@@ -117,6 +117,7 @@ def garmin_login():
 
             formatted_data.append({
                 'date': date_str,
+                'startTime': start_time[11:16],  # 현지 시작 시각 HH:MM (날씨 조회용)
                 'km': "{:.2f}".format(km),
                 'paceSec': pace_sec,
                 'timeSec': duration,
@@ -235,6 +236,7 @@ def get_strava_data():
 
             formatted_data.append({
                 "date": local_date,
+                "startTime": start_date[11:16],  # 현지 시작 시각 HH:MM (날씨 조회용)
                 "km": km,
                 "paceSec": pace_sec,
                 "timeSec": moving_time,
@@ -509,8 +511,9 @@ def coros_import():
             tz = int(a.get('startTimezone') or 0) * 15 * 60  # 15분 단위 → 초
             t0 = int(a.get('startTime') or 0)
             date_str = datetime.utcfromtimestamp(t0 + tz).strftime('%Y.%m.%d') if t0 else ''
+            time_str = datetime.utcfromtimestamp(t0 + tz).strftime('%H:%M') if t0 else ''
             out.append({
-                'date': date_str, 'km': '{:.2f}'.format(km), 'paceSec': int(sec / km) if km > 0 else 0,
+                'date': date_str, 'startTime': time_str, 'km': '{:.2f}'.format(km), 'paceSec': int(sec / km) if km > 0 else 0,
                 'timeSec': sec, 'type': 'coros', 'sportType': name, 'elevGain': round(float(a.get('ascent') or 0)),
                 'activityId': str(a.get('labelId') or ''), 'corosSport': st, 'name': a.get('name') or '',
                 'polyline': None, 'elevProfile': None, 'summit': None, 'start': None,
