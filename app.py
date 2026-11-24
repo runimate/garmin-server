@@ -51,6 +51,35 @@ def garmin_elev_profile(details):
         print(f"Garmin elevation parse failed: {e}")
         return None
 
+def summit_point(lats, lngs, elevs):
+    """좌표·고도 배열에서 가장 높은 지점의 [위도, 경도, 고도]를 돌려줌 (없으면 None)."""
+    best = None
+    for la, lo, e in zip(lats, lngs, elevs):
+        if la is None or lo is None or e is None:
+            continue
+        if best is None or e > best[2]:
+            best = [round(la, 6), round(lo, 6), round(e, 1)]
+    return best
+
+
+def garmin_summit(details):
+    """상세 차트(directLatitude/Longitude/Elevation)에서 최고 고도 지점. 없으면 폴리라인의 altitude로 시도."""
+    try:
+        idx = {m.get('key'): m.get('metricsIndex') for m in (details.get('metricDescriptors') or [])}
+        la, lo, ei = idx.get('directLatitude'), idx.get('directLongitude'), idx.get('directElevation')
+        if None not in (la, lo, ei):
+            rows = [r.get('metrics') or [] for r in details.get('activityDetailMetrics') or []]
+            rows = [m for m in rows if max(la, lo, ei) < len(m)]
+            sp = summit_point([m[la] for m in rows], [m[lo] for m in rows], [m[ei] for m in rows])
+            if sp:
+                return sp
+        pts = (details.get('geoPolylineDTO') or {}).get('polyline') or []
+        return summit_point([p.get('lat') for p in pts], [p.get('lon') for p in pts], [p.get('altitude') for p in pts])
+    except Exception as e:
+        print(f"Garmin summit parse failed: {e}")
+        return None
+
+
 # ==========================================
 # [1] GARMIN
 # ==========================================
@@ -95,6 +124,9 @@ def garmin_login():
                 'sportType': sport_type, # <--- 프론트엔드로 전달!
                 'elevGain': round(elev_gain),
                 'activityId': act.get('activityId'),
+                # 시작 지점 좌표 [위도, 경도] (목록 응답에 있으면)
+                'start': [act.get('startLatitude'), act.get('startLongitude')] if act.get('startLatitude') is not None and act.get('startLongitude') is not None else None,
+                'summit': None, # 최고 고도 지점 [위도, 경도, 고도] — 아래 상세 조회에서 채움
                 'polyline': None, # 아래에서 제한된 개수만 채움 (Railway 부담 방지)
                 'elevProfile': None # 고도표용 [[km, m], ...] — 폴리라인과 같은 상세 응답에서 함께 채움
             })
@@ -118,6 +150,7 @@ def garmin_login():
                 ]
                 item['polyline'] = coords if len(coords) >= 2 else None
                 item['elevProfile'] = garmin_elev_profile(details)
+                item['summit'] = garmin_summit(details)
             except Exception as poly_err:
                 print(f"Garmin polyline fetch failed for activity {activity_id}: {poly_err}")
                 item['polyline'] = None
@@ -209,7 +242,9 @@ def get_strava_data():
                 "sportType": sport_type, # <--- 프론트엔드로 전달!
                 "elevGain": round(elev_gain),
                 "polyline": polyline, # <--- 인코딩된 문자열. 디코딩은 프론트에서 처리.
-                "activityId": activity.get("id")
+                "activityId": activity.get("id"),
+                # 시작 지점 좌표 [위도, 경도]
+                "start": activity.get("start_latlng") if len(activity.get("start_latlng") or []) == 2 else None
             })
 
         result = {"success": True, "data": formatted_data}
@@ -236,7 +271,7 @@ def get_strava_elevation():
         resp = requests.get(
             f"https://www.strava.com/api/v3/activities/{int(activity_id)}/streams",
             headers={"Authorization": f"Bearer {token}"},
-            params={"keys": "altitude,distance", "key_by_type": "true"},
+            params={"keys": "altitude,distance,latlng", "key_by_type": "true"},
             timeout=15
         )
         if resp.status_code == 401:
@@ -245,7 +280,9 @@ def get_strava_elevation():
         streams = resp.json() or {}
         dist = (streams.get('distance') or {}).get('data') or []
         elev = (streams.get('altitude') or {}).get('data') or []
-        return jsonify({"success": True, "elevProfile": downsample_profile(dist, elev)})
+        ll = (streams.get('latlng') or {}).get('data') or []
+        summit = summit_point([p[0] for p in ll], [p[1] for p in ll], elev[:len(ll)]) if ll else None
+        return jsonify({"success": True, "elevProfile": downsample_profile(dist, elev), "summit": summit})
 
     except Exception as e:
         print(f"Strava elevation Error: {str(e)}")
