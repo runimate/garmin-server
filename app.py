@@ -156,7 +156,14 @@ def garmin_login():
                 print(f"Garmin polyline fetch failed for activity {activity_id}: {poly_err}")
                 item['polyline'] = None
 
-        return jsonify({'success': True, 'data': formatted_data})
+        # 사용자 단위 설정: 'statute_us'/'statute_uk' → 마일
+        units = 'km'
+        try:
+            us = (client.get_unit_system() or '').lower()
+            if us.startswith('statute'): units = 'mi'
+        except Exception as ue:
+            print(f"Garmin unit system failed: {ue}")
+        return jsonify({'success': True, 'data': formatted_data, 'units': units})
 
     except Exception as e:
         print(f"Garmin Error: {e}")
@@ -249,7 +256,14 @@ def get_strava_data():
                 "start": activity.get("start_latlng") if len(activity.get("start_latlng") or []) == 2 else None
             })
 
-        result = {"success": True, "data": formatted_data}
+        # 사용자 단위 설정 (profile:read_all 권한이 있을 때 measurement_preference = 'feet' → 마일)
+        units = 'km'
+        try:
+            me = requests.get("https://www.strava.com/api/v3/athlete", headers=headers, timeout=10).json()
+            if me.get('measurement_preference') == 'feet': units = 'mi'
+        except Exception as ue:
+            print(f"Strava athlete fetch failed: {ue}")
+        result = {"success": True, "data": formatted_data, "units": units}
         if return_token:
             result["token"] = access_token
             result["tokenExpiresAt"] = token_data.get("expires_at")
